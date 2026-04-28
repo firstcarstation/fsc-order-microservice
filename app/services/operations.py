@@ -222,6 +222,12 @@ def garage_settings_update_api(db: Session, ctx: AuthContext, payload: dict[str,
     if "contact_email" in payload:
         row.contact_email = (str(payload.get("contact_email") or "").strip() or None)
     row.updated_at = _now()
+    # Jobs snapshot garage_lat/lng at creation; refresh all non-terminal jobs so recovery sees updates.
+    if row.lat is not None and row.lng is not None:
+        db.query(Job).filter(Job.status.notin_([JobStatusEnum.DELIVERED, JobStatusEnum.CANCELLED])).update(
+            {"garage_lat": row.lat, "garage_lng": row.lng},
+            synchronize_session=False,
+        )
     db.commit()
     return {"message": "Updated"}
 
@@ -946,8 +952,8 @@ def schedule_delivery_api(
             raise AppException("Driver not available at that time", status_code=409)
     job.agent_id = driver_id
     job.scheduled_at = scheduled_at
-    job.status = JobStatusEnum.OUT_FOR_DELIVERY
-    _touch_job_milestones(job, JobStatusEnum.OUT_FOR_DELIVERY)
+    # Driver must explicitly start delivery in the app (customer + transparency).
+    job.status = JobStatusEnum.DELIVERY_SCHEDULED
     if note:
         job.admin_note = (job.admin_note or "") + ("\n" if job.admin_note else "") + note
     job.updated_at = _now()
@@ -980,6 +986,54 @@ def schedule_delivery_api(
         data={"job_id": job.job_id, "kind": "delivery_assigned"},
     )
     return {"job_id": job.job_id, "status": _status_str(job.status), "scheduled_at": job.scheduled_at.isoformat()}
+
+
+def start_delivery_api(db: Session, ctx: AuthContext, *, job_id: str) -> dict[str, Any]:
+    """Recovery agent taps 'Start delivery' to notify customer.
+
+    This is intentionally separate from status updates because:
+    - Scheduling assigns a driver + time.
+    - Starting delivery is the real-world "driver is leaving now" moment.
+    """
+    job = assert_job_view(db, job_id, ctx)
+    if not _is_staff(ctx):
+        if not job.agent_id or str(job.agent_id) != ctx.user_id:
+            raise AppException("Forbidden", status_code=403)
+    prev = _status_str(job.status)
+    if job.status == JobStatusEnum.DELIVERY_SCHEDULED:
+        job.status = JobStatusEnum.OUT_FOR_DELIVERY
+        job.updated_at = _now()
+    elif job.status == JobStatusEnum.OUT_FOR_DELIVERY:
+        # Idempotent: already en route (e.g. double tap).
+        return {"job_id": job.job_id, "status": _status_str(job.status), "message": "ok"}
+    else:
+        raise AppException(
+            "Start delivery is only available after admin schedules delivery (delivery_scheduled).",
+            status_code=400,
+        )
+    # Post a system message so it appears in chat instantly for transparency.
+    db.add(
+        ChatMessage(
+            message_id=str(uuid.uuid4()),
+            job_id=job.job_id,
+            sender_id=ctx.user_id,
+            message_type=MessageTypeEnum.SYSTEM,
+            body="Delivery started",
+            payload={"kind": "delivery_started", "from": prev, "to": _status_str(job.status)},
+        )
+    )
+    db.commit()
+    # Push the customer so their app refreshes even if they are on another screen.
+    try:
+        send_notification_event(
+            title="Delivery started",
+            body="Your car is on the way to your delivery location.",
+            user_id=str(job.customer_id),
+            data={"job_id": job.job_id, "kind": "delivery_started"},
+        )
+    except Exception:
+        pass
+    return {"job_id": job.job_id, "status": _status_str(job.status), "message": "ok"}
 
 
 def claim_job_api(

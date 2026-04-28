@@ -20,7 +20,11 @@ class JobStatusEnum(str, PyEnum):
     IN_REPAIR = "in_repair"
     REPAIR_COMPLETE = "repair_complete"
     READY_FOR_DELIVERY = "ready_for_delivery"
+    # Admin assigned driver + time; agent must tap "Start delivery" before en route.
+    DELIVERY_SCHEDULED = "delivery_scheduled"
     OUT_FOR_DELIVERY = "out_for_delivery"
+    # Agent at customer drop-off; delivery photos + mark delivered follow.
+    DELIVERY_ARRIVED = "delivery_arrived"
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
 

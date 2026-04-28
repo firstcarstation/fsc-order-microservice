@@ -162,6 +162,15 @@ def jobs_schedule_delivery(
     )
 
 
+@router.post("/jobs/start-delivery")
+def jobs_start_delivery(
+    payload: dict,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(get_current_user),
+):
+    return op.start_delivery_api(db, ctx, job_id=payload["job_id"])
+
+
 @router.post("/jobs/assign-bay")
 def jobs_assign_bay(
     payload: dict,
